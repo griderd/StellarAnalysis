@@ -74,6 +74,8 @@ namespace StellarAnalysis
 
         #region Public Methods
 
+        #region General
+
         /// <summary>
         /// Adds a filter to the filter list.
         /// </summary>
@@ -139,6 +141,22 @@ namespace StellarAnalysis
             ClearFilters();
         }
 
+        public void UpdateDisplay()
+        {
+            image.Unlock();
+
+            UnmanagedImage temp = image.workingImage.Clone();
+            for (int i = 0; i < filters.Count; i++)
+            {
+                temp = filters[i].Apply(image.workingImage);
+                image.workingImage.Dispose();
+                image.workingImage = temp.Clone();
+                temp.Dispose();
+            }
+
+            image.Lock();
+        }
+
         public void CountBlobs()
         {
             // Blob size for automatic should be set approimately 0.36% of the width of the image.
@@ -166,12 +184,20 @@ namespace StellarAnalysis
             }
 
             overlay = new Overlay(objects.ToArray(), image.Width, image.Height, image.PixelFormat);
-            AddFilter(new Add(overlay.DisplayImage));
+            AddFilter(new Add(overlay.image.display));
         }
 
         public void SelectObject(int index)
         {
             overlay.SelectObject(index);
+            for (int i = 0; i < filters.Count; i++)
+            {
+                if (filters[i] is Add)
+                {
+                    filters[i] = new Add(overlay.image.display);
+                    return;
+                }
+            }
         }
 
         public void Dispose()
@@ -185,6 +211,142 @@ namespace StellarAnalysis
             image = null;
             overlay = null;
         }
+
+        #endregion
+
+        #region Analysis Functions
+
+        /// <summary>
+        /// Automatically identifies objects in the image based on their locations. Requires two objects to be identified manually.
+        /// </summary>
+        /// <param name="unidentified">A list of objects that could not be identified.</param>
+        /// <returns>Returns true if there are enough starter IDs. Otherwise returns false.</returns>
+        public bool AutoIdentify(out SkyObject[] unidentified)
+        {
+            List<SkyObject> unid = new List<SkyObject>();
+
+            SkyObject a, b;
+            a = b = null;
+
+            for (int i = 0; i < objects.Count; i++)
+            {
+                if (objects[i].CatEntry != null)
+                {
+                    if (a == null)
+                        a = objects[i];
+                    else if (b == null)
+                        b = objects[i];
+                    else
+                        break;
+                }
+            }
+
+            if (b == null)
+            {
+                unidentified = null;
+                return false;
+            }
+
+            PointVector pA = new PointVector(a.Location);
+            PointVector pB = new PointVector(b.Location);
+            PointVector pDiff = pA - pB;
+
+            SkyVector sA = a.CatEntry.Position;
+            SkyVector sB = b.CatEntry.Position;
+            SkyVector sDiff = sA - sB;
+
+            double xScaleLength = sDiff.RA.Degrees.Fractional / pDiff.X;
+            double yScaleLength = sDiff.DE.Fractional / pDiff.Y;
+
+            for (int i = 0; i < objects.Count; i++)
+            {
+                if (objects[i].CatEntry != null)
+                    continue;
+
+                PointVector pObj = new PointVector(objects[i].Location);
+                PointVector pObjDiff = pA - pObj;
+
+                double xScaleDiff = xScaleLength * pObjDiff.X;
+                double yScaleDiff = yScaleLength * pObjDiff.Y;
+                SkyVector scaleDiff = new SkyVector(new HourAngle(xScaleDiff), yScaleDiff);
+
+                SkyVector objPos = sA - scaleDiff;
+
+                // Try to find star in catalog
+                CatalogEntry entry;
+                if (Program.GC.GetStarAtPosition(objPos, 0.025f, 0.025f, out entry))
+                {
+                    objects[i].CatEntry = entry;
+                }
+                else
+                {
+                    objects[i].Position = objPos;
+                    unid.Add(objects[i]);
+                }
+            }
+
+            unidentified = unid.ToArray();
+            return true;
+        }
+
+        public bool AutoRotate()
+        {
+            SkyObject a, b;
+            a = b = null;
+
+            for (int i = 0; i < objects.Count; i++)
+            {
+                if (objects[i].CatEntry != null)
+                {
+                    if (a == null)
+                        a = objects[i];
+                    else if (b == null)
+                        b = objects[i];
+                    else
+                        break;
+                }
+            }
+
+            if (b == null)
+            {
+                return false;
+            }
+
+            PointVector pA = new PointVector(a.Location);
+            PointVector pB = new PointVector(b.Location);
+            PointVector pDiff = pA - pB;
+
+            SkyVector sA = a.CatEntry.Position;
+            SkyVector sB = b.CatEntry.Position;
+            SkyVector sDiff = sA - sB;
+
+            double pointAngle = RadiansToDegrees(Math.Atan2((double)pDiff.Y, (double)pDiff.X));
+            double posAngle = RadiansToDegrees(Math.Atan(sDiff.DE.Fractional / sDiff.RA.Degrees.Fractional));
+
+            double rotation = pointAngle - posAngle;
+
+            for (int i = 0; i < filters.Count; i++)
+            {
+                if (filters[i] is Add)
+                {
+                    filters.RemoveAt(i);
+                }
+            }
+
+            // We're using a bicubic rotation instead of a bilinear rotation
+            // Bicubic is more precise, but it does take a bit longer and is
+            // more memory intensive. However, Bilinear has a habit of dropping
+            // enough detail for the blob counter to use.
+            AddFilter(new RotateBicubic(rotation, true));
+            UpdateDisplay();
+            objects.Clear();
+
+            CountBlobs();
+
+            return true;
+        }
+
+        #endregion
 
         #region Filters
 
@@ -241,20 +403,10 @@ namespace StellarAnalysis
 
         #region Private Methods
 
-        void UpdateDisplay()
+        double RadiansToDegrees(double radians)
         {
-            image.Unlock();
-
-            UnmanagedImage temp = image.workingImage.Clone();
-            for (int i = 0; i < filters.Count; i++)
-            {
-                temp = filters[i].Apply(image.workingImage);
-                image.workingImage.Dispose();
-                image.workingImage = temp.Clone();
-                temp.Dispose();
-            }
-
-            image.Lock();
+            double result = (180.0f / Math.PI) * radians;
+            return result;
         }
 
         #endregion
