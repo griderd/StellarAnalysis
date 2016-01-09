@@ -243,7 +243,7 @@ namespace StellarAnalysis
             overlay.Unlock();
 
             Rectangle r = objects[lstObjects.SelectedIndex].ObjectBlob.Rectangle;
-
+            Drawing.Rectangle(overlay.workingImage, r, Color.Blue);
             for (int j = 1; j < thickness; j++)
             {
                 r = new Rectangle(r.X - 1, r.Y - 1, r.Width + 2, r.Height + 2);
